@@ -10,7 +10,7 @@ from dspy.predict.flex import Flex
 
 from dspy.evaluate import Evaluate  # isort: skip
 from dspy.clients import *  # isort: skip
-from dspy.adapters import Adapter, ChatAdapter, JSONAdapter, XMLAdapter, TwoStepAdapter, Image, Audio, BoundingBox, File, History, Type, Tool, ToolCalls, ToolCallResults, Code, Reasoning  # isort: skip
+from dspy.adapters import Adapter, ChatAdapter, JSONAdapter, XMLAdapter, TwoStepAdapter, Image, Audio, BoundingBox, File, History, Type, Tool, ToolAnnotations, ToolCalls, ToolCallResults, Code, Reasoning  # isort: skip
 from dspy.primitives.sandbox_serializable import SandboxSerializable  # isort: skip
 from dspy.utils.exceptions import (
     AdapterParseError,
@@ -33,7 +33,20 @@ from dspy.utils.exceptions import (
     LMUnexpectedError,
     LMUnsupportedFeatureError,
     LMUnsupportedModelError,
+    ToolPolicyError,
     is_retryable_lm_error,
+)
+from dspy.utils.tool_policy import (
+    Allow,
+    Deny,
+    Modify,
+    ReadOnlyToolPolicy,
+    ToolAllowlistPolicy,
+    ToolApprovalPolicy,
+    ToolCallBudgetPolicy,
+    ToolCallContext,
+    ToolPolicy,
+    ToolPolicyDecision,
 )
 from dspy.utils.logging_utils import configure_dspy_loggers, disable_logging, enable_logging
 from dspy.utils.asyncify import asyncify

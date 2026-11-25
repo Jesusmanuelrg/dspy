@@ -117,10 +117,19 @@ async def test_convert_mcp_tool_with_v2_client():
 
     from mcp.client import Client
     from mcp.server import MCPServer
+    from mcp.types import ToolAnnotations as MCPToolAnnotations
 
     server = MCPServer("test")
 
-    @server.tool()
+    @server.tool(
+        annotations=MCPToolAnnotations(
+            title="Increment",
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        )
+    )
     def increment(value: int) -> int:
         return value + 1
 
@@ -129,6 +138,13 @@ async def test_convert_mcp_tool_with_v2_client():
         increment_tool = Tool.from_mcp_tool(client, response.tools[0])
         structured_increment_tool = Tool.from_mcp_tool(client, response.tools[0], result_mode="structured")
 
+        assert increment_tool.annotations == dspy.ToolAnnotations(
+            title="Increment",
+            read_only=True,
+            destructive=False,
+            idempotent=True,
+            open_world=False,
+        )
         assert await increment_tool.acall(value=1) == "2"
         assert await structured_increment_tool.acall(value=1) == {"result": 2}
 

@@ -65,6 +65,7 @@ from dspy.primitives.sandbox_guest import INTERPRETER_TOOL, LM_TOOL, read_wire
 from dspy.primitives.sandbox_serializable import SandboxSerializable, build_repl_variable
 from dspy.signatures.signature import ensure_signature
 from dspy.utils.exceptions import format_error_for_lm
+from dspy.utils.tool_policy import tool_caller_context
 
 if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
@@ -848,14 +849,17 @@ class RLM(Module):
         if inspect.iscoroutinefunction(tool.func) or inspect.iscoroutinefunction(getattr(tool.func, "__call__", None)):
 
             async def invoke(*args, **kwargs):
-                return checked(await tool.acall(**signature.bind_partial(*args).arguments, **kwargs))
+                with tool_caller_context("rlm"):
+                    return checked(await tool.acall(**signature.bind_partial(*args).arguments, **kwargs))
         else:
 
             def invoke(*args, **kwargs):
-                return checked(tool(**signature.bind_partial(*args).arguments, **kwargs))
+                with tool_caller_context("rlm"):
+                    return checked(tool(**signature.bind_partial(*args).arguments, **kwargs))
 
         functools.update_wrapper(invoke, tool.func)
         invoke.__signature__ = signature
+        invoke.__dspy_policy_mediated__ = True
         return invoke
 
     def _prepare_execution_tools(self, budget: _LLMCallBudget | None = None, typed: bool = True) -> dict[str, Callable]:

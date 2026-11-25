@@ -46,7 +46,7 @@ import dspy
 from dspy._vendor.lm15 import serde
 from dspy.adapters.base import Prompt
 from dspy.adapters.chat_adapter import ChatAdapter
-from dspy.adapters.types.tool import Tool
+from dspy.adapters.types.tool import Tool, ToolAnnotations
 from dspy.adapters.utils import parse_value
 from dspy.clients.base_lm import BaseLM
 from dspy.lm15 import BuiltinTool, CacheConfig, FunctionTool, Request
@@ -196,8 +196,18 @@ class Wire:
             return fields
 
     def encode_tool(self, tool: Tool) -> dict[str, Any]:
-        return {TAG: "tool", "name": tool.name, "desc": tool.desc, "args": self.encode(tool.args),
-                "arg_desc": self.encode(tool.arg_desc), "has_kwargs": tool.has_kwargs}
+        node: dict[str, Any] = {
+            TAG: "tool",
+            "name": tool.name,
+            "desc": tool.desc,
+            "args": self.encode(tool.args),
+            "arg_desc": self.encode(tool.arg_desc),
+            "has_kwargs": tool.has_kwargs,
+        }
+        annotations = getattr(tool, "annotations", None)
+        if annotations is not None:
+            node["annotations"] = dataclasses.asdict(annotations)
+        return node
 
     def decode_tool(self, node: dict[str, Any]) -> Tool:
         """A tool from the other side, which describes it: its function stays there."""
@@ -207,8 +217,23 @@ class Wire:
             raise RuntimeError(f"The tool {name!r} runs on the other side of the sandbox boundary.")
 
         args = self.decode(node.get("args")) or {}
-        tool = Tool(elsewhere, name=name, desc=node.get("desc"), args=args, arg_types=dict.fromkeys(args, Any),
-                    arg_desc=self.decode(node.get("arg_desc")))
+        raw_annotations = self.decode(node.get("annotations"))
+        annotations = (
+            raw_annotations
+            if isinstance(raw_annotations, ToolAnnotations)
+            else ToolAnnotations(**raw_annotations)
+            if isinstance(raw_annotations, dict)
+            else None
+        )
+        tool = Tool(
+            elsewhere,
+            name=name,
+            desc=node.get("desc"),
+            args=args,
+            arg_types=dict.fromkeys(args, Any),
+            arg_desc=self.decode(node.get("arg_desc")),
+            annotations=annotations,
+        )
         tool.has_kwargs = bool(node.get("has_kwargs"))
         return tool
 
@@ -536,8 +561,24 @@ class HostTool(Tool):
 
         func.__name__ = func.__qualname__ = name
         func.__dspy_host_tool__ = name  # kept by wrappers, so a nested interpreter calls the host tool directly
-        super().__init__(func, name=name, desc=spec["desc"], args=spec["args"], arg_types=dict.fromkeys(spec["args"], Any))
+        raw_annotations = spec.get("annotations")
+        annotations = (
+            raw_annotations
+            if isinstance(raw_annotations, ToolAnnotations)
+            else ToolAnnotations(**raw_annotations)
+            if isinstance(raw_annotations, dict)
+            else None
+        )
+        super().__init__(
+            func,
+            name=name,
+            desc=spec["desc"],
+            args=spec["args"],
+            arg_types=dict.fromkeys(spec["args"], Any),
+            annotations=annotations,
+        )
         self.has_kwargs = spec["has_kwargs"]
+        self._policy_exempt = True
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         # Generated code may call a tool positionally, in the order the host declares its arguments.

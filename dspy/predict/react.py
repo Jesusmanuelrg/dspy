@@ -11,6 +11,7 @@ from dspy.primitives.module import Module
 from dspy.primitives.prediction import Prediction
 from dspy.signatures.signature import ensure_signature
 from dspy.utils.exceptions import AdapterParseError, ContextWindowExceededError, format_error_for_lm
+from dspy.utils.tool_policy import tool_caller_context
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +97,15 @@ class ReAct(Module):
         for name, field in output_fields.items():
             if description := field.json_schema_extra.get("desc"):
                 args[name]["description"] = description
-        return Tool(
+        submit_tool = Tool(
             submit,
             name="submit",
             desc="Submit the final outputs for the task.",
             args=args,
             arg_types=arg_types,
         )
+        submit_tool._policy_exempt = True
+        return submit_tool
 
     def _make_react_signature(self) -> type[Signature]:
         fields = {}
@@ -242,7 +245,8 @@ class ReAct(Module):
                 continue
 
             try:
-                value = self.tools[tool_call.name](**(tool_call.args or {}))
+                with tool_caller_context("react"):
+                    value = self.tools[tool_call.name](**(tool_call.args or {}))
                 values.append(value)
                 is_errors.append(False)
                 if tool_call.name == "submit" and isinstance(value, dict):
@@ -265,7 +269,8 @@ class ReAct(Module):
                 continue
 
             try:
-                value = await self.tools[tool_call.name].acall(**(tool_call.args or {}))
+                with tool_caller_context("react"):
+                    value = await self.tools[tool_call.name].acall(**(tool_call.args or {}))
                 values.append(value)
                 is_errors.append(False)
                 if tool_call.name == "submit" and isinstance(value, dict):

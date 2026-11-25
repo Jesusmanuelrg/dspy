@@ -1,6 +1,8 @@
 import asyncio
+import dataclasses
 import inspect
 import json
+from dataclasses import dataclass
 from decimal import Decimal
 from numbers import Number
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, get_origin, get_type_hints
@@ -16,6 +18,18 @@ from dspy.adapters.types.base_type import Type
 from dspy.dsp.utils.settings import settings
 from dspy.lm15 import FunctionTool
 from dspy.utils.callback import with_callbacks
+from dspy.utils.exceptions import ToolPolicyError
+from dspy.utils.tool_policy import (
+    ToolCallContext,
+    aevaluate_after_call,
+    aevaluate_before_call,
+    call_with_tool_policy,
+    evaluate_after_call,
+    evaluate_before_call,
+    get_active_tool_policies,
+    get_tool_caller,
+    tool_caller_context,
+)
 
 if TYPE_CHECKING:
     import mcp
@@ -90,6 +104,17 @@ def _json_field_value(value: Any, bytes_mode: Literal["utf8", "base64", "hex"]) 
         return value  # e.g. an arbitrary object, which the schema leaves unchecked
 
 
+@dataclass(frozen=True)
+class ToolAnnotations:
+    """Optional behavioral metadata describing a tool (e.g. MCP ToolAnnotations)."""
+
+    title: str | None = None
+    read_only: bool | None = None
+    destructive: bool | None = None
+    idempotent: bool | None = None
+    open_world: bool | None = None
+
+
 class Tool(Type):
     """Tool class.
 
@@ -104,6 +129,8 @@ class Tool(Type):
     arg_types: dict[str, Any] | None = None
     arg_desc: dict[str, str] | None = None
     has_kwargs: bool = False
+    annotations: ToolAnnotations | None = None
+    _policy_exempt: bool = pydantic.PrivateAttr(default=False)
 
     def __init__(
         self,
@@ -113,6 +140,7 @@ class Tool(Type):
         args: dict[str, Any] | None = None,
         arg_types: dict[str, Any] | None = None,
         arg_desc: dict[str, str] | None = None,
+        annotations: ToolAnnotations | None = None,
     ):
         """Initialize the Tool class.
 
@@ -130,6 +158,8 @@ class Tool(Type):
                 from arg name to the type of the argument. Defaults to None.
             arg_desc (Optional[dict[str, str]], optional): Descriptions for each arg, represented as a
                 dictionary from arg name to description string. Defaults to None.
+            annotations (Optional[ToolAnnotations], optional): Optional behavioral metadata for policy evaluation.
+                Defaults to None.
 
         Examples:
 
@@ -142,7 +172,15 @@ class Tool(Type):
         # Expected output: {'x': {'type': 'integer'}, 'y': {'type': 'string', 'default': 'hello'}}
         ```
         """
-        super().__init__(func=func, name=name, desc=desc, args=args, arg_types=arg_types, arg_desc=arg_desc)
+        super().__init__(
+            func=func,
+            name=name,
+            desc=desc,
+            args=args,
+            arg_types=arg_types,
+            arg_desc=arg_desc,
+            annotations=annotations,
+        )
         self._parse_function(func, arg_desc)
 
     def _parse_function(self, func: Callable, arg_desc: dict[str, str] | None = None):
@@ -283,27 +321,62 @@ class Tool(Type):
     @with_callbacks
     def __call__(self, **kwargs):
         parsed_kwargs = self._validate_and_parse_args(**kwargs)
+        policies = () if getattr(self, "_policy_exempt", False) else get_active_tool_policies()
+        ctx: ToolCallContext | None = None
+        if policies:
+            ctx = ToolCallContext(
+                tool_name=self.name or "",
+                args=dict(parsed_kwargs),
+                tool=self,
+                annotations=getattr(self, "annotations", None),
+                caller=get_tool_caller(),
+            )
+            ctx, modified = evaluate_before_call(policies, ctx)
+            if modified:
+                parsed_kwargs = self._validate_and_parse_args(**ctx.args)
+                ctx = dataclasses.replace(ctx, args=dict(parsed_kwargs))
+
         result = self.func(**parsed_kwargs)
         if asyncio.iscoroutine(result):
             if settings.allow_tool_async_sync_conversion:
-                return self._run_async_in_sync(result)
+                result = self._run_async_in_sync(result)
             else:
+                result.close()
                 raise ValueError(
                     "You are calling `__call__` on an async tool, please use `acall` instead or enable "
                     "async-to-sync conversion with `dspy.configure(allow_tool_async_sync_conversion=True)` "
                     "or `with dspy.context(allow_tool_async_sync_conversion=True):`."
                 )
+
+        if policies and ctx is not None:
+            result = evaluate_after_call(policies, ctx, result)
         return result
 
     @with_callbacks
     async def acall(self, **kwargs):
         parsed_kwargs = self._validate_and_parse_args(**kwargs)
+        policies = () if getattr(self, "_policy_exempt", False) else get_active_tool_policies()
+        ctx: ToolCallContext | None = None
+        if policies:
+            ctx = ToolCallContext(
+                tool_name=self.name or "",
+                args=dict(parsed_kwargs),
+                tool=self,
+                annotations=getattr(self, "annotations", None),
+                caller=get_tool_caller(),
+            )
+            ctx, modified = await aevaluate_before_call(policies, ctx)
+            if modified:
+                parsed_kwargs = self._validate_and_parse_args(**ctx.args)
+                ctx = dataclasses.replace(ctx, args=dict(parsed_kwargs))
+
         result = self.func(**parsed_kwargs)
         if asyncio.iscoroutine(result):
-            return await result
-        else:
-            # We should allow calling a sync tool in the async path.
-            return result
+            result = await result
+
+        if policies and ctx is not None:
+            result = await aevaluate_after_call(policies, ctx, result)
+        return result
 
     @classmethod
     def from_mcp_tool(
@@ -431,7 +504,7 @@ class ToolCalls(Type):
             elif isinstance(functions, list):
                 for tool in functions:
                     if tool.name == self.name:
-                        func = tool.func
+                        func = tool
                         break
 
             if func is None:
@@ -439,7 +512,12 @@ class ToolCalls(Type):
 
             try:
                 args = self.args or {}
-                return func(**args)
+                if isinstance(func, Tool):
+                    with tool_caller_context("tool_call"):
+                        return func(**args)
+                return call_with_tool_policy(self.name, func, args, caller="tool_call")
+            except ToolPolicyError:
+                raise
             except Exception as e:
                 raise RuntimeError(f"Error executing tool '{self.name}': {e}") from e
 

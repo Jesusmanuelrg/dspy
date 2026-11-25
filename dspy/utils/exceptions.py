@@ -294,9 +294,38 @@ def format_error_for_lm(error: BaseException, *, traceback_frames: int = 0) -> s
     """
     if traceback_frames <= 0:
         return str(error)
-    return "\n" + "".join(
-        traceback.format_exception(type(error), error, error.__traceback__, limit=traceback_frames)
-    ).strip()
+    return (
+        "\n"
+        + "".join(traceback.format_exception(type(error), error, error.__traceback__, limit=traceback_frames)).strip()
+    )
+
+
+class ToolPolicyError(DSPyError, PermissionError):
+    """Raised when a tool execution policy denies or fails to authorize a tool call.
+
+    Args:
+        message: Human-readable denial or policy failure reason.
+        tool_name: Name of the tool whose execution was blocked.
+        policy: Policy instance that blocked or failed the call, when available.
+        reason: Policy-supplied denial reason, when available.
+        **kwargs: Structured error metadata accepted by `DSPyError`.
+    """
+
+    default_code = "tool_policy_denied"
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        tool_name: str | None = None,
+        policy: Any = None,
+        reason: str | None = None,
+        **kwargs: Any,
+    ):
+        self.tool_name = tool_name
+        self.policy = policy
+        self.reason = reason
+        super().__init__(message, **kwargs)
 
 
 class AdapterParseError(DSPyError):

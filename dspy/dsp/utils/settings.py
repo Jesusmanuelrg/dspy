@@ -37,6 +37,8 @@ DEFAULT_CONFIG = dotdict(
     warn_on_type_mismatch=True,  # Whether to log warnings when a module's input type doesn't match the signature type.
     # Replaces `dspy.PythonInterpreter` in code-executing modules that carry no factory of their own.
     interpreter_factory=None,
+    # Runtime tool execution policy (a ToolPolicy or sequence of ToolPolicy instances).
+    tool_policy=None,
 )
 
 # Global base configuration and owner tracking

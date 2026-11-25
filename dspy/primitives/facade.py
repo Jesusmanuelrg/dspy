@@ -79,6 +79,7 @@ from dspy.primitives.sandbox_serializable import KEEP_IN_DUMP, SandboxSerializab
 from dspy.signatures.field import InputField, OutputField
 from dspy.signatures.signature import make_signature
 from dspy.utils.exceptions import LMError, LMNotConfiguredError
+from dspy.utils.tool_policy import acall_with_tool_policy, call_with_tool_policy, tool_caller_context
 
 logger = logging.getLogger(__name__)
 
@@ -400,16 +401,95 @@ _SIMPLE_ANNOTATIONS = {"str": str, "int": int, "float": float, "bool": bool, "li
 _PARAMETER_KINDS = {kind.name: kind for kind in type(inspect.Parameter.POSITIONAL_ONLY)}
 
 
-def _entrypoint(tool: Any) -> Callable[..., Any]:
-    """A provided tool as an interpreter tool: called through its ``dspy.Tool``, with its function's signature."""
-    if not isinstance(tool, Tool):
-        return tool
+def _args_to_kwargs(sig: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
+    if not args:
+        return dict(kwargs)
+    bound = sig.bind_partial(*args, **kwargs)
+    out: dict[str, Any] = {}
+    for param_name, value in bound.arguments.items():
+        param = sig.parameters[param_name]
+        if param.kind == inspect.Parameter.VAR_KEYWORD and isinstance(value, dict):
+            out.update(value)
+        else:
+            out[param_name] = value
+    return out
 
-    @functools.wraps(tool.func)
-    def entrypoint(**kwargs: Any) -> Any:
-        return tool(**kwargs)
 
-    return entrypoint
+def _call_with_signature(func: Callable[..., Any], sig: inspect.Signature, call_kwargs: dict[str, Any]) -> Any:
+    pos_only = [p.name for p in sig.parameters.values() if p.kind == inspect.Parameter.POSITIONAL_ONLY]
+    var_pos = next((p.name for p in sig.parameters.values() if p.kind == inspect.Parameter.VAR_POSITIONAL), None)
+    if not pos_only and var_pos is None:
+        return func(**call_kwargs)
+    remaining = dict(call_kwargs)
+    pos_args = [remaining.pop(name) for name in pos_only if name in remaining]
+    if var_pos is not None and var_pos in remaining:
+        pos_args.extend(remaining.pop(var_pos))
+    return func(*pos_args, **remaining)
+
+
+def _is_async_callable(fn: Any) -> bool:
+    if inspect.iscoroutinefunction(fn):
+        return True
+    if not callable(fn) or inspect.isfunction(fn) or inspect.ismethod(fn) or isinstance(fn, type):
+        return False
+    return inspect.iscoroutinefunction(fn.__call__)
+
+
+def _entrypoint(tool: Any, *, name: str | None = None) -> Callable[..., Any]:
+    """A provided tool as an interpreter tool: called through its ``dspy.Tool`` (or policy-mediated callable),
+    with its function's signature."""
+    if isinstance(tool, Tool):
+        if _is_async_callable(tool.func):
+
+            @functools.wraps(tool.func)
+            async def async_tool_entrypoint(**kwargs: Any) -> Any:
+                with tool_caller_context("sandbox"):
+                    return await tool.acall(**kwargs)
+
+            async_tool_entrypoint.__dspy_policy_mediated__ = True
+            return async_tool_entrypoint
+
+        @functools.wraps(tool.func)
+        def entrypoint(**kwargs: Any) -> Any:
+            with tool_caller_context("sandbox"):
+                return tool(**kwargs)
+
+        entrypoint.__dspy_policy_mediated__ = True
+        return entrypoint
+
+    tool_name = name or getattr(tool, "__name__", type(tool).__name__)
+    sig = inspect.signature(tool)
+    if _is_async_callable(tool):
+
+        @functools.wraps(tool)
+        async def async_plain_entrypoint(*args: Any, **kwargs: Any) -> Any:
+            call_kwargs = _args_to_kwargs(sig, args, kwargs)
+            return await acall_with_tool_policy(
+                tool_name,
+                tool,
+                call_kwargs,
+                caller="sandbox",
+                invoke=lambda kw: _call_with_signature(tool, sig, kw),
+            )
+
+        async_plain_entrypoint.__signature__ = sig
+        async_plain_entrypoint.__dspy_policy_mediated__ = True
+        return async_plain_entrypoint
+
+    @functools.wraps(tool)
+    def plain_entrypoint(*args: Any, **kwargs: Any) -> Any:
+        call_kwargs = _args_to_kwargs(sig, args, kwargs)
+        return call_with_tool_policy(
+            tool_name,
+            tool,
+            call_kwargs,
+            caller="sandbox",
+            invoke=lambda kw: _call_with_signature(tool, sig, kw),
+        )
+
+    plain_entrypoint.__signature__ = sig
+    plain_entrypoint.__dspy_policy_mediated__ = True
+    return plain_entrypoint
 
 
 class SandboxSession:
@@ -513,7 +593,7 @@ class SandboxSession:
             interpreter = _create_interpreter(self._interpreter_factory)
             interpreter.tools[INTERPRETER_TOOL] = self._serve_interpreter  # for the modules its own code builds
             handle = secrets.token_hex(8)
-            host_tools = {name: _entrypoint(tool) for name, tool in self._tools.items()}
+            host_tools = {name: _entrypoint(tool, name=name) for name, tool in self._tools.items()}
             self._nested[handle] = _NestedInterpreter(interpreter, host_tools, self._values)
             return handle
         nested = self._nested.get(id)
@@ -542,14 +622,19 @@ class SandboxSession:
             raise CodeInterpreterError(f"Unknown tool {tool!r}")
         provided = self._tools[tool]
         registered = (getattr(self._interpreter, "tools", None) or {}).get(tool)
-        function = registered if callable(registered) else _entrypoint(provided)
         kwargs = self._values.decode(arguments or {})
         # A dspy.Tool (an RLM's registered tools call theirs) reads its arguments as declared itself: reading them here
         # too would validate a model twice. Only a plain function gets them as declared from here.
         if not isinstance(provided, Tool):
             declared = Tool(provided).arg_types
             kwargs = {name: _as_declared(value, declared.get(name)) for name, value in kwargs.items()}
-        result = function(**kwargs)
+        if callable(registered):
+            if isinstance(provided, Tool) or getattr(registered, "__dspy_policy_mediated__", False):
+                result = registered(**kwargs)
+            else:
+                result = _entrypoint(registered, name=tool)(**kwargs)
+        else:
+            result = _entrypoint(provided, name=tool)(**kwargs)
         if asyncio.iscoroutine(result):
             from dspy.primitives.python_interpreter import _await_in_sync
 
@@ -994,4 +1079,8 @@ def _lm_spec(lm: Any) -> dict[str, Any]:
 
 def _tool_spec(name: str, tool: Any) -> dict[str, Any]:
     tool = tool if isinstance(tool, Tool) else Tool(tool)
-    return {"name": name, "desc": tool.desc or "", "args": tool.args, "has_kwargs": tool.has_kwargs}
+    spec: dict[str, Any] = {"name": name, "desc": tool.desc or "", "args": tool.args, "has_kwargs": tool.has_kwargs}
+    annotations = getattr(tool, "annotations", None)
+    if annotations is not None:
+        spec["annotations"] = dataclasses.asdict(annotations)
+    return spec

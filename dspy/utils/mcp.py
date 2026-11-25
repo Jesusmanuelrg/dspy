@@ -1,6 +1,7 @@
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
-from dspy.adapters.types.tool import Tool, _MCPToolClient, convert_input_schema_to_tool_args
+from dspy.adapters.types.tool import Tool, ToolAnnotations, _MCPToolClient, convert_input_schema_to_tool_args
 
 if TYPE_CHECKING:
     import mcp
@@ -8,10 +9,31 @@ if TYPE_CHECKING:
 
 def _get_field(obj: Any, snake_name: str, camel_name: str, default: Any = None) -> Any:
     """Read a field whose Python name changed between mcp SDK v1 and v2."""
-    for name in (snake_name, camel_name):
+    names = (snake_name,) if snake_name == camel_name else (snake_name, camel_name)
+    if isinstance(obj, Mapping):
+        for name in names:
+            if name in obj:
+                return obj[name]
+        return default
+    for name in names:
         if hasattr(obj, name):
             return getattr(obj, name)
     return default
+
+
+def _extract_mcp_annotations(tool: Any) -> ToolAnnotations | None:
+    raw = _get_field(tool, "annotations", "annotations", default=None)
+    if raw is None:
+        return None
+    if isinstance(raw, ToolAnnotations):
+        return raw
+    return ToolAnnotations(
+        title=_get_field(raw, "title", "title", default=None),
+        read_only=_get_field(raw, "read_only_hint", "readOnlyHint", default=None),
+        destructive=_get_field(raw, "destructive_hint", "destructiveHint", default=None),
+        idempotent=_get_field(raw, "idempotent_hint", "idempotentHint", default=None),
+        open_world=_get_field(raw, "open_world_hint", "openWorldHint", default=None),
+    )
 
 
 def _field_is_set(obj: Any, snake_name: str, camel_name: str) -> bool:
@@ -83,4 +105,14 @@ def convert_mcp_tool(
         result = await session.call_tool(tool.name, arguments=kwargs)
         return _convert_mcp_tool_result(result, result_mode=result_mode)
 
-    return Tool(func=func, name=tool.name, desc=tool.description, args=args, arg_types=arg_types, arg_desc=arg_desc)
+    annotations = _extract_mcp_annotations(tool)
+
+    return Tool(
+        func=func,
+        name=tool.name,
+        desc=tool.description,
+        args=args,
+        arg_types=arg_types,
+        arg_desc=arg_desc,
+        annotations=annotations,
+    )

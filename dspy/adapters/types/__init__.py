@@ -6,6 +6,19 @@ from dspy.adapters.types.file import File
 from dspy.adapters.types.history import History
 from dspy.adapters.types.image import Image
 from dspy.adapters.types.reasoning import Reasoning
-from dspy.adapters.types.tool import Tool, ToolCallResults, ToolCalls
+from dspy.adapters.types.tool import Tool, ToolAnnotations, ToolCallResults, ToolCalls
 
-__all__ = ["History", "Image", "Audio", "File", "Type", "Tool", "ToolCalls", "ToolCallResults", "Code", "Reasoning", "BoundingBox"]
+__all__ = [
+    "History",
+    "Image",
+    "Audio",
+    "File",
+    "Type",
+    "Tool",
+    "ToolAnnotations",
+    "ToolCalls",
+    "ToolCallResults",
+    "Code",
+    "Reasoning",
+    "BoundingBox",
+]

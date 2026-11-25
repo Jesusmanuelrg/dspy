@@ -9,6 +9,18 @@ from dspy.utils.callback import BaseCallback, with_callbacks
 from dspy.utils.dummies import DummyLM, DummyVectorizer, dummy_rm
 from dspy.utils.inspect_history import pretty_print_history
 from dspy.utils.syncify import syncify
+from dspy.utils.tool_policy import (
+    Allow,
+    Deny,
+    Modify,
+    ReadOnlyToolPolicy,
+    ToolAllowlistPolicy,
+    ToolApprovalPolicy,
+    ToolCallBudgetPolicy,
+    ToolCallContext,
+    ToolPolicy,
+    ToolPolicyDecision,
+)
 
 
 def download(url):
@@ -35,4 +47,14 @@ __all__ = [
     "StatusMessage",
     "StatusMessageProvider",
     "pretty_print_history",
+    "Allow",
+    "Deny",
+    "Modify",
+    "ReadOnlyToolPolicy",
+    "ToolAllowlistPolicy",
+    "ToolApprovalPolicy",
+    "ToolCallBudgetPolicy",
+    "ToolCallContext",
+    "ToolPolicy",
+    "ToolPolicyDecision",
 ]
